@@ -1,6 +1,8 @@
 ---
 layout: global
-title: Tuning Spark
+displayTitle: Tuning Spark
+title: Tuning
+description: Tuning and performance optimization guide for Spark SPARK_VERSION_SHORT
 ---
 
 * This will become a table of contents (this text will be scraped).
@@ -51,7 +53,7 @@ To register your own custom classes with Kryo, use the `registerKryoClasses` met
 
 {% highlight scala %}
 val conf = new SparkConf().setMaster(...).setAppName(...)
-conf.registerKryoClasses(Seq(classOf[MyClass1], classOf[MyClass2]))
+conf.registerKryoClasses(Array(classOf[MyClass1], classOf[MyClass2]))
 val sc = new SparkContext(conf)
 {% endhighlight %}
 

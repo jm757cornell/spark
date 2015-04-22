@@ -81,14 +81,16 @@ private[nio] class ConnectionManager(
   private val ackTimeoutMonitor =
     new HashedWheelTimer(Utils.namedThreadFactory("AckTimeoutMonitor"))
 
-  private val ackTimeout = conf.getInt("spark.core.connection.ack.wait.timeout", 60)
+  private val ackTimeout =
+    conf.getTimeAsSeconds("spark.core.connection.ack.wait.timeout",
+      conf.get("spark.network.timeout", "120s"))
 
   // Get the thread counts from the Spark Configuration.
-  // 
+  //
   // Even though the ThreadPoolExecutor constructor takes both a minimum and maximum value,
   // we only query for the minimum value because we are using LinkedBlockingDeque.
-  // 
-  // The JavaDoc for ThreadPoolExecutor points out that when using a LinkedBlockingDeque (which is 
+  //
+  // The JavaDoc for ThreadPoolExecutor points out that when using a LinkedBlockingDeque (which is
   // an unbounded queue) no more than corePoolSize threads will ever be created, so only the "min"
   // parameter is necessary.
   private val handlerThreadCount = conf.getInt("spark.core.connection.handler.threads.min", 20)
@@ -173,7 +175,7 @@ private[nio] class ConnectionManager(
     serverChannel.socket.bind(new InetSocketAddress(port))
     (serverChannel, serverChannel.socket.getLocalPort)
   }
-  Utils.startServiceOnPort[ServerSocketChannel](port, startService, name)
+  Utils.startServiceOnPort[ServerSocketChannel](port, startService, conf, name)
   serverChannel.register(selector, SelectionKey.OP_ACCEPT)
 
   val id = new ConnectionManagerId(Utils.localHostName, serverChannel.socket.getLocalPort)
@@ -183,13 +185,16 @@ private[nio] class ConnectionManager(
   // to be able to track asynchronous messages
   private val idCount: AtomicInteger = new AtomicInteger(1)
 
+  private val writeRunnableStarted: HashSet[SelectionKey] = new HashSet[SelectionKey]()
+  private val readRunnableStarted: HashSet[SelectionKey] = new HashSet[SelectionKey]()
+
+  @volatile private var isActive = true
   private val selectorThread = new Thread("connection-manager-thread") {
-    override def run() = ConnectionManager.this.run()
+    override def run(): Unit = ConnectionManager.this.run()
   }
   selectorThread.setDaemon(true)
+  // start this thread last, since it invokes run(), which accesses members above
   selectorThread.start()
-
-  private val writeRunnableStarted: HashSet[SelectionKey] = new HashSet[SelectionKey]()
 
   private def triggerWrite(key: SelectionKey) {
     val conn = connectionsByKey.getOrElse(key, null)
@@ -231,7 +236,6 @@ private[nio] class ConnectionManager(
     } )
   }
 
-  private val readRunnableStarted: HashSet[SelectionKey] = new HashSet[SelectionKey]()
 
   private def triggerRead(key: SelectionKey) {
     val conn = connectionsByKey.getOrElse(key, null)
@@ -339,7 +343,7 @@ private[nio] class ConnectionManager(
 
   def run() {
     try {
-      while(!selectorThread.isInterrupted) {
+      while (isActive) {
         while (!registerRequests.isEmpty) {
           val conn: SendingConnection = registerRequests.dequeue()
           addListeners(conn)
@@ -395,7 +399,7 @@ private[nio] class ConnectionManager(
           } catch {
             // Explicitly only dealing with CancelledKeyException here since other exceptions
             // should be dealt with differently.
-            case e: CancelledKeyException => {
+            case e: CancelledKeyException =>
               // Some keys within the selectors list are invalid/closed. clear them.
               val allKeys = selector.keys().iterator()
 
@@ -417,8 +421,11 @@ private[nio] class ConnectionManager(
                   }
                 }
               }
-            }
-            0
+              0
+
+            case e: ClosedSelectorException =>
+              logDebug("Failed select() as selector is closed.", e)
+              return
           }
 
         if (selectedKeysCount == 0) {
@@ -985,10 +992,11 @@ private[nio] class ConnectionManager(
   }
 
   def stop() {
+    isActive = false
     ackTimeoutMonitor.stop()
+    selector.close()
     selectorThread.interrupt()
     selectorThread.join()
-    selector.close()
     val connections = connectionsByKey.values
     connections.foreach(_.close())
     if (connectionsByKey.size != 0) {
