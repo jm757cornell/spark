@@ -303,8 +303,7 @@ private[spark] class Executor(
           if (Utils.inShutdown()) {
             val reason = ExecutorExitFailure(None, metrics)
             execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
-          }
-          else {
+          } else {
             val taskEndReason = new ExceptionFailure(t, metrics)
             execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(taskEndReason))
             // Don't forcibly exit unless the exception was inherently fatal, to avoid
